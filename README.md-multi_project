@@ -1,0 +1,29 @@
+##############
+#  Context   #
+##############
+
+This application uses a functional approach towards the idea of modularity. The entry point is batch_main.sh, but it also uses main.sh and the library. 
+Since I had not the possibility of integrating the solution with triggers, API calls where made to change build statuses.
+
+
+#################
+# Functionality #
+#################
+
+A file with a group of projects to track will be given, and if the line is correct (project, token, user), then main.sh will be spawned independently.
+These are the steps:
+- Iterate over "projects.txt" to track projects and check if they are correct
+- Launch main.sh
+-- Reach bitbucket project
+-- Clone repositories if they should be treated
+-- Make the changes
+-- Push changes
+-- Wait for build (3 times)
+-- If build is successful, attempt a pull request
+
+
+Note: this application has been discontinued because the converter tool does not track different images and it panics easily. That way a switch to Golang will be made to enhance that functionality with this logic.
+
+
+Nonetheless, it was interesting to learn about bash, awk, sed, jq, git, curl, bitbucket's API and vim.
+Thinking about automating the solution concurrently was really fun.

@@ -1,0 +1,636 @@
+# Functions for upgrading project's repositories from 3.x to 4.x
+
+# Constant global variables (context of the project)
+# After testing, put as read only: declare -r these vars 
+#PROJECT_LOGFILE="${PROJECT}_log.csv"
+#API_URL="https://domain.com/rest/api/1.0/projects/${PROJECT}"
+HEADER_LOG="1i RepoName,IS_HTTP_CLONABLE,MainBranch,metadataFilePrevStatus,metadataFileCurrentStatus,JenkinsfilePrevStatus,JenkinsfileCurrentStatus,HasPushed,HashLastCommit,BuildStatus,PullRequest"
+CONVERTER_PATH='./converter'
+#CONTEXT_DIR=$PWD
+PATH=".:$PATH"
+
+# Make sure that all the necessary variables are set prior complete execution
+# Parameters:
+# - USER -> user that runs the script 
+# - TOKEN   -> TOKEN for a given project 
+# - PROJECT -> name of the project 
+# - PROJECT_LOGFILE -> this will track the project 
+# - API_URL -> endpoint of the project in bitbucket
+# - CONTEXT_DIR -> this is necessary since the expectation is to work with various projects at the same time
+# - ACTION -> action to take in the project (it's checked here in case the script is run individually from main.sh)
+# Note: at the moment it just check if the variables are set properly. It will be helpful when a list of projects are given as an argument to the main script
+set_context_project(){
+
+    PROJECT=$1
+    PROJECT_LOGFILE="${PROJECT}_log.csv"
+    #API_URL="https://domain.com/rest/api/1.0/projects/${PROJECT}"
+    API_URL="https://domain.com/rest/api/1.0/projects/${PROJECT}"
+    TOKEN=$2
+    USER=$3
+    ACTION=$4
+    CONTEXT_DIR=$PWD
+
+
+    if [[ -z ${USER} || -z ${TOKEN} || -z ${PROJECT} || -z ${PROJECT_LOGFILE} || -z ${API_URL} || -z ${CONTEXT_DIR} || -z ${ACTION} ]]; then
+        echo -e "\nError: please, make sure that the user, TOKEN, project, url's api, pwd and action variables are set.\nExiting the script.";
+        exit;
+    fi
+
+}
+
+
+# It needs four arguments: a project name, a token for the project, a user responsible for handling it and the action to be taken
+check_context_project_and_call(){
+
+    local project_name=$1
+    local token_project=$2
+    local user=$3
+    local action=$4 
+    
+    echo "params -> $*"
+    if [[ $# != 4 ]]; then
+        echo -e "\nOmitting project $1"
+        incorrect_args_msg ${FUNCNAME[0]} 4 $#
+        return $?;
+    else
+        # Inside this method it starts in the background
+        start_process_for_project ${project_name} ${token_project} ${user} ${action}
+        return $?;        
+    fi
+
+}
+
+
+# Call the main program with one use case. It needs four arguments, three are passed by check_context_project_and_call directly and the fourth one (action) is a choice the user made for all the projects in the text file.
+# This method creates a subdirectory with everything it needs to apply the changes and do the check. It can be thought as a worker node
+start_process_for_project(){
+    
+    if [[ ! -d $1 ]]; then
+        mkdir $1
+        cp func_update_3x_4x.lib main.sh template_payload.json converter fake* $1        
+    fi
+    go_subdir $1
+    ./main.sh $1 $2 $3 ${ACTION} &
+    go_parentdir
+
+    return 0
+
+}
+
+# It will prompt the user to know what action would like to take in the projects listed in the file
+# It does not require any arguments but it returns a string that is the name of the function that will be called later in the program
+menu_prompt(){
+    
+    local options=("Complete execution" "Update build statuses" "Attempt pull requests" "Update builds and attempt PR");
+    PS3="Please select an option: ";
+
+# TODO pass project name
+
+    select _ in "${options[@]}"; do
+        
+        case ${REPLY} in
+            1)  echo "full_execution_wrapper"
+                ;;
+            2)  echo "build_status_wrapper"
+                ;;
+            3)  echo "pull_request_wrapper"
+                ;;
+            4)  echo "update_status_and_pull_request_wrapper"
+                ;;
+            *)  echo -e "Option not available.\nPlease, try again later."
+                ;;
+        esac
+    exit
+    done
+}
+
+# Do option 1
+full_execution_wrapper(){
+
+    iterate_over_repos_in_projectlogfile clone_if_meet_prerequisites
+    make_basic_changes_from_3x
+    # THIS IS FAKING THAT I HAVE JENKINS SET AND COMUNICATION WITH ATLASSIAN
+    curl -s -L -i -X POST -H "Content-Type: application/json" -L -u ${USER}:${TOKEN} "https://domain.com/rest/build-status/1.0/commits/$( awk -F, '/^edpst-plain-3x/ {print $9}' ${PROJECT_LOGFILE} )" -d @fake_build_inprogress.json
+    curl -s -L -i -X POST -H "Content-Type: application/json" -L -u ${USER}:${TOKEN} "https://domain.com/rest/build-status/1.0/commits/$( awk -F, '/^multiple_jenkinsfiles/ {print $9}' ${PROJECT_LOGFILE} )" -d @fake_build_success.json
+    curl -s -L -i -X POST -H "Content-Type: application/json" -L -u ${USER}:${TOKEN} "https://domain.com/rest/build-status/1.0/commits/$( awk -F, '/^repo4_jenkinsok/ {print $9}' ${PROJECT_LOGFILE} )" -d @fake_build_failed.json
+
+    update_build_status  
+    create_pull_request
+ 
+}
+
+
+# Option 2 
+build_status_wrapper(){
+
+    check_file_existence ${PROJECT_LOGFILE}
+    [[ $? == 0 ]] && update_build_status  
+ 
+}
+
+# Option 3
+pull_request_wrapper(){
+
+    check_file_existence ${PROJECT_LOGFILE}
+    [[ $? == 0 ]] && create_pull_request
+
+} 
+
+
+# Option 4
+update_status_and_pull_request_wrapper(){
+
+    [[ $? == 0 ]] && update_build_status  
+    [[ $? == 0 ]] && create_pull_request || echo -e "\nError while updating statuses.\nOmitting pull request step"
+
+}
+
+
+# It requires one argument: the one to check if the file exists in current directory
+check_file_existence(){
+
+    if [[ $# != 1 ]]; then
+        incorrect_args_msg ${FUNCNAME[0]} 1 $#
+        return $?;
+    else
+        if [[ -e $1 ]]; then
+            return 0; 
+        else
+            echo -e "\nError: no file with name $1 found in current path.\nPlease, make sure you have one and try again.\n\nExiting Script."
+            exit
+        fi
+    fi 
+}
+
+# check if there are repositories in the given project. if so, it will check if there has been
+# a previous track of them locally comparing the remotes with the local project's log file
+check_repos_synchronicity_and_adjust(){
+
+    local repos=$(curl -s -L -u ${USER}:${TOKEN} "${API_URL}/repos" | jq -r ".values[].slug")
+
+    if [ -z "${repos}" ]; then 
+        echo -e "\nwarning: no repositories in project: ${PROJECT}.\nexiting script.";
+        return 1;
+    else
+        echo -e "\n## working in project: ${PROJECT} ##\n";
+        # by default, it will override the log file, so it creates a copy of the previous execution
+        # if a log already exists and will append new repositories to be treated if that were the case 
+        if [ -f ${PROJECT_LOGFILE} ]; then
+            cp ${PROJECT_LOGFILE} "${PROJECT_LOGFILE}.prev"
+            for remote in ${repos}; do 
+                if [[ ${remote} == $( look_for_row_and_print_field "$remote" 1 ) ]]; then 
+                    echo "already checked $remote in last execution."; 
+                else 
+                    echo "${remote}," >> ${PROJECT_LOGFILE}; 
+                fi;
+           done        
+        else
+            echo "${repos}" > ${PROJECT_LOGFILE};
+            sed -i "${HEADER_LOG}" ${PROJECT_LOGFILE};
+            sed -i "s/$/,/" ${PROJECT_LOGFILE};
+        fi
+    fi
+}
+
+# function that reflects inconsistencies in relation to the number of arguments required and passed 
+# it requires 3 arguments: name of the calling function, # of required arguments and # of actual arguments
+incorrect_args_msg(){
+    echo -e "\nError in function $1.\nincorrect number of arguments: required($2) - passed($3)"; 
+    return 1; 
+}
+
+# this function takes two arguments, the first one is the pattern to look for, and the second is the text to append
+# note: it is not expected the pattern be a regex expression
+look_for_row_and_append(){
+    
+    if [[ $# != 2 ]]; then
+        incorrect_args_msg ${FUNCNAME[0]} 2 $#
+        return $?;
+    else
+        sed -i "/^$1,/s/$/$2,/" ${PROJECT_LOGFILE};
+    fi
+
+}
+
+# function that gets the current repositories in the project log's file
+# requires a function that will make use of each repository
+iterate_over_repos_in_projectlogfile(){
+    
+    if [[ $# != 1 ]]; then 
+        incorrect_args_msg ${FUNCNAME[0]} 1 $#
+        return $?;
+    else
+        for repo in $(awk -F, "NR>1 {print "'$1'"}" ${PROJECT_LOGFILE}); do 
+            $1 ${repo}
+        done
+    fi
+
+}
+
+# look for a concrete row and retrieve a field from it
+# it requires two parameters: the pattern to search for and the position of the field to print
+# note: pattern is thought to be a fixed string
+look_for_row_and_print_field(){
+ 
+    if [[ $# != 2 ]]; then 
+        incorrect_args_msg ${FUNCNAME[0]} 2 $#
+        return $?;
+    else
+        echo $(awk -F, "/^$1,/ {col=$2; print "'$col'"}" ${PROJECT_LOGFILE}); 
+    fi
+
+}
+
+
+# it requires one parameter, the target directory
+go_subdir(){
+ 
+    if [[ $# != 1 ]]; then 
+        incorrect_args_msg ${FUNCNAME[0]} 1 $#
+        return $?;
+    else
+        cd $1;
+    fi
+
+}
+
+# no parameters required
+go_parentdir(){
+
+    if [[ $# != 0 ]]; then 
+        incorrect_args_msg ${FUNCNAME[0]} 0 $#
+        return $?;
+    else
+        cd ..;
+    fi
+
+
+}
+
+
+# requires two arguments, the action git needs and the rest of the command as a second one
+do_git_operation(){
+ 
+    if [[ $# != 2 ]]; then 
+        incorrect_args_msg ${FUNCNAME[0]} 2 $#
+        return $?;
+    else
+        case $1 in
+            "clone") 
+                git -c "http.extraHeader=Authorization: Bearer ${TOKEN}" clone $2
+                ;;
+            "get_default_branch")
+                git symbolic-ref HEAD | awk -F/ '{print $3}'
+                ;;
+            "checkout")
+                git checkout -b $2 
+                ;;
+            "push" ) 
+                git -c "http.extraHeader=Authorization: Bearer ${TOKEN}" push origin $2
+                ;;
+            "add" )
+                git add . 
+                ;;
+            "commit" )
+                git commit -m "update version 3.x to 4.x" 
+                ;;
+            "get_last_commit" )
+                git log -1 --pretty=oneline | awk '{print $1}' 
+                ;;
+            *) echo "git operation unknown";;
+        esac
+    fi
+}
+
+# It brings the shallow info about the repository and saves it locally as a json file
+# An identifier of the repo should be given
+get_info_repo_in_local_json(){
+ 
+    if [[ $# != 1 ]]; then 
+        incorrect_args_msg ${FUNCNAME[0]} 1 $#
+        return $?;
+    else
+        curl -s -L -u ${USER}:${TOKEN} "${API_URL}/repos/$1" | jq '.' > "$1"_info.json
+    fi
+}
+
+# part 2 - checking if repositories are reachable through http and cloning them if needed
+# it requires one argument that is the name of the local repository (present in the project log's file)
+clone_if_meet_prerequisites(){
+ 
+    if [[ $# != 1 ]]; then 
+        incorrect_args_msg ${FUNCNAME[0]} 1 $#
+        return $?;
+    else
+        # if it is not locally or if it is but it has not been tracked yet 
+         if [[ ! -d $1 || -d $1 && -z $( look_for_row_and_print_field $1 2 ) ]]; then
+
+            # take the info of the remote as reference before any change
+            get_info_repo_in_local_json $1
+
+            # check if there was a http endpoint
+            local scm_url=$( jq -r '.links.clone[].href' "$1"_info.json | grep http )
+            if [[ ! -z ${scm_url} ]]; then
+                echo -e "\n- repo $1 is clonable";
+                # If the column is empty, append it
+                [[ -z $( look_for_row_and_print_field $1 2 ) ]] && look_for_row_and_append $1 "yes"
+
+                # search for jenkinsfile and metadata.yml
+                statuses_arr=($(curl -is -L -u ${USER}:${TOKEN} "${API_URL}/repos/$1/raw/{Jenkinsfile,metadata.yml}" | awk '/^HTTP/ {print $2}'));
+                if [[ ${statuses_arr[0]} == 200 && ${statuses_arr[1]} == 200 ]]; then
+                    echo -e "There is a Jenkinsfile and metadata.yml! cloning $1\n";
+                    do_git_operation clone "${scm_url}"
+                else
+                    echo -e "Error: repo $1 does not have Jenkinsfile or metadata.yml.\nNot cloning it";
+                fi
+            else
+                echo -e "\n- repo $1 is not clonable";
+                [[ -z $( look_for_row_and_print_field $1 2 ) ]] && look_for_row_and_append $1 "no"
+            fi
+
+        else
+            echo -e "\nWarning! A local directory already exists with the same name as the remote repo $1, or it was tracked in the last execution.\nOmitting it.\n"
+        fi
+    fi
+}
+
+
+# Set converter tool locally
+# more info about this application can be found here -> source: https://github.com/opendevstack/ods-jenkinsfile-converter
+set_converter_tool(){
+
+    local answer
+
+    echo -e "\nChecking if converter tool is present in ${CONTEXT_DIR}\n";
+    
+    if [ -e ${CONVERTER_PATH} ]; then 
+        echo "Converter tool exists"; 
+    else 
+        echo "Converter tool doesn't exist"; 
+      #  read -n1 -p "Should we download it if not present and make it executable? [y/n] " answer
+        # At the moment is goind to be automatically asigned to yes 
+        local answer="y"
+        if [ $(echo ${answer} | tr '[:upper:]' '[:lower:]') == 'y' ]; then
+            curl -O -L "https://github.com/opendevstack/ods-jenkinsfile-converter/releases/download/v0.1.2/converter"
+        fi
+    fi
+
+    if [ -x ${CONVERTER_PATH} ]; then
+        echo "Converter tool is executable. ready to go!";
+    elif [ $(echo ${answer} | tr '[:upper:]' '[:lower:]') == 'y' ]; then
+        echo "Attempting to make it executable if user have the proper permission";
+        chmod 744 ${CONVERTER_PATH};
+        [[ $? != 0 ]] && echo "Error: user cannot make file executable. Stopping future changes" && exit 
+    fi
+
+}
+
+
+#
+# This function requires one argument that is the name of the repository to be changed
+change_release_manager_from_3x(){
+    
+    local proceed
+
+    if [[ $# != 1 ]]; then
+        incorrect_args_msg ${FUNCNAME[0]} 1 $#
+        return $?;
+    else
+     
+        go_subdir $1
+        local default_branch=$( do_git_operation "get_default_branch" "" );
+
+        check_if_repository_previously_updated $1 ${default_branch}
+
+        local rm_jenkins_version=$( sed -n "/@Library/p" Jenkinsfile | cut -d"@" -f 3 | cut -c 1-3 );
+        go_parentdir
+
+        if [[ ${rm_jenkins_version} != '3.x' && -z $( look_for_row_and_print_field $1 6 ) ]]; then
+            look_for_row_and_append $1 "${default_branch},releaseManagerRepo,noVersionMetadataInRM,${rm_jenkins_version},NoChange";
+            echo -e "\nWARNING: No changes to apply in repository $1 because the version is not 3.x\n";
+        
+        elif [[ ${rm_jenkins_version} == '3.x' && -z $( look_for_row_and_print_field $1 6 ) ]]; then
+
+            go_subdir $1
+            do_git_operation checkout "$1"-update
+            echo -e "\nPreviewing the changes for the repo: $1"
+            ../converter -filename="Jenkinsfile" --dry-run; 
+
+            # read -n1 -p "Proceed with the changes? [y/n] " proceed
+            # The same way as with converter tool, right now it's going to be 'y' by default
+            local proceed="y"
+            if [ $(echo ${proceed} | tr '[:upper:]' '[:lower:]') == 'y' ]; then
+                echo "Applying changes in repo: $1..."
+                ../converter -filename="Jenkinsfile" -out "Jenkinsfile";
+                do_git_operation add ""
+                do_git_operation commit "" 
+                local hash_last_commit=$( do_git_operation get_last_commit "" )
+                do_git_operation push "$1"-update
+
+                if [[ $? == 0 ]]; then
+                    go_parentdir
+                    echo -e "\n Changes in branch $1-update pushed to $1";
+                    look_for_row_and_append $1 "${default_branch},releaseManagerRepo,noVersionMetadataInRM,3.x,4.x,Pushed,${hash_last_commit}";
+                else
+                    go_parentdir
+                    look_for_row_and_append $1 "${default_branch},releaseManagerRepo,noVersionMetadataInRM,3.x,4.x,ERROR=NotPushed,${hash_last_commit}";
+                    echo -e "\n\nERROR while pushing $1 to remote.\nCheck ${PROJECT_LOGFILE}";
+                fi                        
+            else
+                go_parentdir
+            fi
+        #else
+        #    echo -e "\nWARNING: No changes to apply in repository $1 because the version is not 3.x\n";
+        fi
+
+    fi
+
+}
+
+# Check if the current repository has been changed before from this script.
+# It requires two arguments: the name of the repository($1) and the name of the actual default branch.
+# If the default branch is the same as the one that would be created by the script (repo's name + -update), we assume that changes have been made. Because, otherwise, it would point to the real default branch.
+check_if_repository_previously_updated(){
+
+    if [[ $# != 2 ]]; then
+        incorrect_args_msg ${FUNCNAME[0]} 2 $#
+        return $?;
+    else
+     
+        if [[ "$1-update" == $2 ]]; then
+            echo -e "\nWarning: there are no changes to be made because they were made before and the local repository's default branch points to the update.\nPlease, remove this repository $1 locally for letting the process to be triggered again, or do it manually.";
+            return 1;
+        fi
+    fi
+}
+
+#
+# This function requires one argument that is the name of the repository to be changed
+change_component_from_3x(){
+
+    local proceed
+
+    if [[ $# != 1 ]]; then
+        incorrect_args_msg ${FUNCNAME[0]} 1 $#
+        return $?;
+    else
+     
+        go_subdir $1
+        local default_branch=$( do_git_operation "get_default_branch" "" );
+        check_if_repository_previously_updated $1 ${default_branch}
+
+        local rm_jenkins_version=$( awk -F@ '/^@Library/ {print $3}' Jenkinsfile | cut -c 1-3 );
+        local metadata_version=$( awk '/^version:/ {print $2}' metadata.yml )
+        go_parentdir
+
+        if [[ -z ${metadata_version} && -z $( look_for_row_and_print_field $1 4 )  ]]; then 
+            look_for_row_and_append $1 "${default_branch},ERROR=NoValueInVersion";
+            echo "ERROR: there is no value assigned to the field version in $1 repository for metadata file."
+
+        elif [[ ${metadata_version} == '3.x' ||  
+              ( ${rm_jenkins_version} == '3.x' && -z $( look_for_row_and_print_field $1 6 ) ) ]]; then
+
+            go_subdir $1
+            do_git_operation checkout "$1"-update
+            echo -e "\nPreviewing the changes for the repo: $1"
+            ../converter -filename="Jenkinsfile" --dry-run; 
+
+            #read -n1 -p "Proceed with the changes? [y/n] " proceed
+            local proceed="y"
+            if [ $(echo ${proceed} | tr '[:upper:]' '[:lower:]') == 'y' ]; then
+                echo "Applying changes in repo: $1..."
+                # Change Jenkinsfile
+                ../converter -filename="Jenkinsfile" -out "Jenkinsfile";
+
+                # Change the metadata version 
+                sed -i '/^version:/s/3.x/4.x/' metadata.yml;
+
+                do_git_operation add ""
+
+                do_git_operation commit "" 
+
+                local hash_last_commit=$( do_git_operation get_last_commit "" )
+
+                do_git_operation push "$1"-update
+
+                if [[ $? == 0 ]]; then
+                    go_parentdir
+                    echo -e "\n Changes in branch $1-update pushed to $1";
+                    look_for_row_and_append $1 "${default_branch},3.x,4.x,3.x,4.x,Pushed,${hash_last_commit}";
+                else
+                    go_parentdir
+                    look_for_row_and_append $1 "${default_branch},3.x,4.x,3.x,4.x,ERROR=NotPushed,${hash_last_commit}";
+                    echo -e "\n\nERROR while pushing $1 to remote.\nCheck ${PROJECT_LOGFILE}";
+                fi                        
+            else
+                go_parentdir
+            fi
+
+        else
+            # It will write in csv file only if that columns are still empty
+            [[ -z "$( look_for_row_and_print_field $1 4 )"  ]] && look_for_row_and_append $1 "${default_branch},${metadata_version},NotApplicable,${rm_jenkins_version},NotApplicable";
+            echo -e "\nWARNING: No changes to apply in repository ${file} because the version is not 3.x\n";
+        fi
+    fi 
+}
+
+
+# Making the changes in the filtered repositories if necessary
+make_basic_changes_from_3x(){
+
+    for file in $(ls ${CONTEXT_DIR}); do 
+        if [[ -d ${file} && ( ! "$( look_for_row_and_print_field ${file} 8 )" =~ "Pushed" ) ]]; then
+            
+            # Check if it's a release manager component and if it's the first time it runs
+            if [[ $( awk -F\( '/odsOrchestrationPipeline/ {print $1}' ${file}/Jenkinsfile ) == "odsOrchestrationPipeline" && 
+               -z $( look_for_row_and_print_field ${file} 4 ) ]]; then
+
+                change_release_manager_from_3x ${file}
+
+            else
+                change_component_from_3x ${file}
+            fi
+
+        elif [[ -d ${file} ]]; then
+            echo -e "\nERROR: repo ${file} has already info about a  previous pushed. Thus, it is not allowed to continue.\n";
+        fi
+    done
+
+    unset file 
+}
+
+
+# Check which repos has been pushed: 
+# It would be a maximum of three attemps with a little rest of 45 seconds.
+# There aren't required arguments because it takes the information from a local file
+update_build_status(){
+
+    local attempts=0
+    while [[ ${attempts} -lt 3 ]]; do 
+
+        ((attempts++));
+
+        awk -F, '/,Pushed,/ {print $1,$9,$10}' ${PROJECT_LOGFILE} | while read -r slug hash_commit previous_status; do
+ 
+        case ${previous_status} in 
+            "" | "null" | "INPROGRESS" ) 
+                new_status=$( curl -s -L -u ${USER}:${TOKEN} "https://domain.com/rest/build-status/1.0/commits/${hash_commit}" | jq -r '.values[0].state' ); 
+                # Pretending I have build stage
+                curl -s -L -i -X POST -H "Content-Type: application/json" -L -u ${USER}:${TOKEN} "https://domain.com/rest/build-status/1.0/commits/$( awk -F, '/^edpst-plain-3x/ {print $9}'  ${PROJECT_LOGFILE} )" -d @fake_build_success.json
+                ;; 
+            "SUCCESSFUL" | "FAILED" ) 
+                ;; 
+            *) 
+                echo -e "\nERROR: state of the build in ${slug} is unknown"
+                ;;
+        esac
+
+        if [[ -z ${previous_status} ]]; then
+            look_for_row_and_append ${slug} ${new_status}
+        elif [[ -n ${new_status} && ${previous_status} != ${new_status} ]]; then
+            # Substitute
+            sed -i "/^${slug},/s/${previous_status}/${new_status}/" ${PROJECT_LOGFILE};
+        fi
+
+        done 
+       
+        echo -e "\nWaiting 45 seconds to see if the build statuses changes.\nAttempt ${attempts} of 3."
+        #sleep 45 
+        sleep 5 
+    done
+}
+
+# Check which repos has been built successfully.Then,the particular payload would be created from a template.
+# And, finally, a pull request would be attempted
+# There is no need arguments since it takes the data from previously created files
+create_pull_request(){
+
+    awk -F, '/,SUCCESSFUL,/ {print $1,$3}' ${PROJECT_LOGFILE} | while read -r slug default_branch; do
+
+        # If the info of the repo doesn't exist, it will take it 
+        [[ ! -e "${slug}_info.json" ]] && get_info_repo_in_local_json ${slug}
+        # Array elements: [0]from_branch, [1]repo's name,[2]project's key
+        local my_arr=( "${slug}-update" $(jq '.name,.project.key' "${slug}_info.json"))
+        # Create payload from template
+        sed "s/_title_/${slug}/; 
+             s/_slug_/\"${slug}\"/g; 
+             s/_name_/${my_arr[1]}/g;
+             s/_from_branch_/${my_arr[0]}/;
+             s/_to_branch_/${default_branch}/;
+             s/_project_key_/${my_arr[2]}/g" template_payload.json > "${slug}_payload.json"
+
+        local pull_requests=$( curl -s -L -u ${USER}:${TOKEN} "${API_URL}/repos/${slug}/pull-requests" | jq -r '.values[].fromRef.id' )
+
+        # If there is a PR with the same name in remote, it would not be done again
+        if [[ $( echo ${pull_requests} | tr " " "\n" | sed -n "/${slug}/p" ) == "refs/heads/${slug}-update" ]]; then 
+            look_for_row_and_append ${slug} "WARNING=alreadyInRemotePR"; 
+            echo -e "\nThe branch ${my_arr[0]} from repository ${slug} has already a pull requests to ${default_branch}"
+        else 
+            curl -s -L -X POST -H "Content-Type: application/json" -u ${USER}:${TOKEN} "${API_URL}/repos/${slug}/pull-requests" -d @"${slug}_payload.json"
+            look_for_row_and_append ${slug} "${my_arr[0]}"; 
+            echo -e "\nPull request from branch ${my_arr[0]} to ${default_branch} should be in repository ${slug}"
+        fi
+        unset my_arr
+    done 
+}
+

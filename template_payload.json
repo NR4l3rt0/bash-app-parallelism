@@ -1,0 +1,1 @@
+{ "title": "Update from 3.x to 4.x in _title_", "description": "update from 3.x to 4.x", "fromRef": { "id": "refs/heads/_from_branch_", "repository": { "slug": _slug_, "name": _name_, "project": { "key": _project_key_ }}}, "toRef": {"id": "refs/heads/_to_branch_","repository":{"slug": _slug_, "name": _name_, "project": {"key": _project_key_}}}, "close_source_branch": false }

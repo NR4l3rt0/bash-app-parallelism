@@ -1,0 +1,56 @@
+DevOps practices: automation
+
+-------------
+## Concept ##
+-------------
+
+This script attempts to help in the migration of EDP projects/repositories from version 3.x to 4.x. 
+In essence, there are four things to keep in mind:
+- The entry point is main.sh. Where a user, project's token and project's name should be given. Set that, the script sources the library and shows a menu prompt.
+- All the function definitions are in func_update_3x_4x.lib
+- The template_payload.json file is needed for creating the pull request. It is the concrete payload for POSTing curl.
+- A project logfile is set automatically with option one, and should already exist for options 2 and 3. By default, every time the option one is triggered, the previous logfile's execution is also saved with the extension .prev . Nevertheless, it is recommended to start from scratch. (You can change the expeced name if you want a copy).
+
+##
+
+Requirements:
+- bash (or any kind of linux environment where bash exists; I've used ubuntu with WSL2)
+- jq
+- curl
+
+
+##
+
+Logic:
+When the script runs, a menu prompt like the following will appear.
+
+    What would you like to do?
+
+    1) Complete execution
+    2) Update build statuses
+    3) Attempt pull requests
+    4) Exit
+    Please select an option:
+
+Option one -> will execute it entirely. That is, do the necessary checks for the project's repos, set the project's logfile, clone them if necessary, if converter tool is not present will try to download it. And after that, before each possible change; you will have a preview, and can decide what to do. Then, the rest (option 2 and 3 ) will take place.
+Option two and three -> will check if the project's logfile is present, and then either execute build and pull request processes; or just the pull request one.
+
+
+- Possible TODOs:
+Write a loop for letting iterate more than one project at a time
+
+Note:
+- As this is part of the ODS project. This script makes use of the converter tool which can be found here: https://github.com/opendevstack/ods-jenkinsfile-converter
+ 
+
+Test strategy:
+As the implementation tend to be functional, each function has been tested and should do what is was expected at first hand.
+Each repository in my personal project has been a use case.
+
+Limitations:
+The build process was faked because I am not able to trigger it from my repository. Hence, when the option 1 is executed it will inform up to the build state (probably null if pushed). After that, if the option 2 is executed, it will reach bitbucket's API to get the build status and will continue.
+The steps are tracked by the project's csv file. Besides, much more information about the project and repos will be taken during the process and saved as json files.
+
+The faked build implementation is in the directory workaround.
+
+Feel free to reach me if you have any feedback.
